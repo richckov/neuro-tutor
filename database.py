@@ -1,5 +1,7 @@
 import psycopg2
 
+from typing import Optional
+
 
 def create_connection() -> None:
     try:
@@ -157,3 +159,51 @@ def take_messages() -> str:
             response = 'Пока никто ничего не спрашивал...'
 
     return response
+
+
+def delete_user_history(user_id: int) -> bool:
+    conn = create_connection()
+    cursor = conn.cursor()
+    try:
+        print('Попали в delete_user_history')
+        cursor.execute(
+            "DELETE FROM messages WHERE user_id = %s", (user_id,)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print('История удалена')
+        return True
+    except Exception:
+        print('История не удалена')
+        return False
+
+
+def take_user_telegram_id() -> list[tuple]:
+    conn = create_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT user_telegram_id FROM users")
+            return cursor.fetchall()
+    except Exception as e:
+        print(e)
+    finally:
+        if conn:
+            conn.close()
+
+
+def delete_invalid_user(chat_id: int):
+    """Удаляет невалидного пользователя из БД"""
+    conn = create_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM users WHERE user_telegram_id = %s",
+                (chat_id,)
+            )
+            conn.commit()
+    except Exception as e:
+        print(e)
+    finally:
+        if conn:
+            conn.close()

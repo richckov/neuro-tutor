@@ -13,11 +13,15 @@ from bot_instance import bot
 from openai_client import client
 from database import (setup_database, get_thread_id,
                       save_message, add_member_to_db,
-                      set_user_active_status, is_user_active
+                      set_user_active_status, is_user_active,
+                      delete_user_history,
                       )
 from utils import split_text, escape_markdown, clean_response
-from admin import admin_menu, show_users, show_balance, show_message
-from const import INFO_ABOUT_BOT, ASSISTAND_ID
+from admin import (admin_menu, show_users,
+                   show_balance, show_message,
+                   take_mailing_message
+                   )
+from const import INFO_ABOUT_BOT, ASSISTAND_ID, ADMIN_IDS
 from image import take_image_prompt_from_user
 
 
@@ -51,9 +55,14 @@ def start(message: Message) -> None:
         text='Общая информация о проекте',
         callback_data='info',
     )
+    fix_bot = types.InlineKeyboardButton(
+        text='Не работает бот?',
+        callback_data='fix_bot',
+    )
     markup.add(buttom)
     markup.add(create_image)
     markup.add(info)
+    markup.add(fix_bot)
     user_telegram_id = message.from_user.id
     telegram_username = message.from_user.username or "no_username"
     add_member_to_db(user_telegram_id, telegram_username)
@@ -75,6 +84,11 @@ def start(message: Message) -> None:
 @bot.message_handler(commands=['admin'])
 def admin(message: Message) -> None:
     admin_menu(message)
+
+
+def send_processing_status(user_id: int) -> int:
+    status_msg = bot.send_message(user_id, "🔄 Бот обрабатывает ваш вопрос...")
+    return status_msg.message_id
 
 
 def take_message_from_user(message: Message) -> None:
@@ -115,6 +129,9 @@ def handle_message(message: Message) -> None:
     user_text = message.text[:4096]
 
     bot.send_chat_action(message.chat.id, 'typing')
+
+    status_message_id = send_processing_status(user_id)
+
     if not is_user_active(message.from_user.id):
         return
 
@@ -150,10 +167,13 @@ def handle_message(message: Message) -> None:
         logging.exception("Ошибка добавления сообщения в поток: %s", e)
         return
 
-    executor.submit(process_openai_reply, user_id, thread_id)
+    executor.submit(
+        process_openai_reply, user_id, thread_id, status_message_id,
+    )
 
 
-def process_openai_reply(user_id: int, thread_id: str) -> None:
+def process_openai_reply(
+        user_id: int, thread_id: str, status_message_id: int) -> None:
     run = run_openai_with_retries(thread_id, ASSISTAND_ID)
     if not run:
         bot.send_message(
@@ -187,6 +207,10 @@ def process_openai_reply(user_id: int, thread_id: str) -> None:
             )
     except Exception as e:
         logging.exception("Ошибка обработки ответа от OpenAI: %s", e)
+    try:
+        bot.delete_message(user_id, status_message_id)
+    except Exception as e:
+        logging.error(f"Ошибка при удалении статуса: {e}")
 
 
 @bot.message_handler(content_types=['voice'])
@@ -196,6 +220,8 @@ def handle_voice(message: Message) -> None:
 
     user_id = message.chat.id
     thread_id = get_thread_id(user_id)
+
+    status_message_id = send_processing_status(user_id)
 
     if not thread_id:
         try:
@@ -233,7 +259,9 @@ def handle_voice(message: Message) -> None:
         except Exception as e:
             logging.exception("Ошибка добавления сообщения в поток: %s", e)
             return
-        executor.submit(process_openai_reply, user_id, thread_id)
+        executor.submit(
+            process_openai_reply, user_id, thread_id, status_message_id
+        )
     except Exception as e:
         bot.reply_to(message, f"Ошибка: {e}")
 
@@ -249,6 +277,7 @@ def handle_image(message: Message) -> None:
 
     user_id = message.chat.id
     thread_id = get_thread_id(user_id)
+    status_message_id = send_processing_status(user_id)
 
     if not thread_id:
         try:
@@ -308,10 +337,16 @@ def handle_image(message: Message) -> None:
         for part in formatted_parts:
             save_message(user_id, thread_id, "assistant", part)
             bot.send_message(user_id, part, parse_mode='MarkdownV2')
-
+        executor.submit(
+            process_openai_reply,
+            user_id,
+            thread_id,
+            status_message_id  # <-- Добавлен третий аргумент
+        )
     except Exception as e:
         logging.exception("Ошибка обработки изображения: %s", e)
         bot.reply_to(message, f"❌ Ошибка анализа изображения: {str(e)}")
+        bot.delete_message(user_id, status_message_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == 'ai')
@@ -335,6 +370,60 @@ def info(message: Message) -> None:
     )
 
 
+def fix_bot_take_message(message: Message) -> None:
+    """Обработчик инициализации удаления истории"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton('Удалить историю'))
+
+    # Отправляем сообщение с клавиатурой
+    msg = bot.send_message(
+        chat_id=message.chat.id,
+        text="Для удаления истории нажмите кнопку ниже:",
+        reply_markup=markup
+    )
+
+    # Регистрируем следующий шаг сразу после отправки сообщения
+    bot.register_next_step_handler(msg, fix_bot)
+
+
+def fix_bot(message: Message) -> None:
+    """Фактическое удаление истории"""
+    try:
+        # Удаляем клавиатуру сразу
+        bot.send_chat_action(message.chat.id, 'typing')
+
+        # Проверяем что нажата нужная кнопка
+        if message.text != 'Удалить историю':
+            bot.send_message(message.chat.id, "Действие отменено")
+            return start(message)
+
+        # Выполняем удаление
+        if delete_user_history(message.from_user.id):
+            bot.send_message(
+                chat_id=message.chat.id,
+                text="✅ История успешно удалена!",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+        else:
+            bot.send_message(
+                chat_id=message.chat.id,
+                text="❌ Ошибка при удалении истории",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+
+        return start(message)
+
+    except Exception as e:
+        error_msg = f'Ошибка: {str(e)}'
+        bot.send_message(ADMIN_IDS[0], error_msg)
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Произошла системная ошибка",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return start(message)
+
+
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call: Message) -> None:
     bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -352,8 +441,12 @@ def callback_query(call: Message) -> None:
         show_balance(call.message)
     elif call.data == 'show_history':
         show_message(call.message)
+    elif call.data == 'take_mailing_message':
+        take_mailing_message(call.message)
     elif call.data == 'menu_admin':
         admin(call.message)
+    elif call.data == 'fix_bot':
+        fix_bot_take_message(call.message)
 
 
 if __name__ == "__main__":
