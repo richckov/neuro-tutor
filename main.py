@@ -5,7 +5,7 @@ import typing
 
 from concurrent.futures import ThreadPoolExecutor
 from telebot import types
-from telebot.types import Message
+from telebot.types import Message, CallbackQuery
 from openai.types.beta.threads import Run
 import openai
 
@@ -19,7 +19,7 @@ from database import (setup_database, get_thread_id,
 from utils import split_text, escape_markdown, clean_response
 from admin import (admin_menu, show_users,
                    show_balance, show_message,
-                   take_mailing_message
+                   mailing, write_mailing_message
                    )
 from const import INFO_ABOUT_BOT, ASSISTAND_ID, ADMIN_IDS
 from image import take_image_prompt_from_user
@@ -128,12 +128,10 @@ def handle_message(message: Message) -> None:
     user_id = message.chat.id
     user_text = message.text[:4096]
 
-    bot.send_chat_action(message.chat.id, 'typing')
-
-    status_message_id = send_processing_status(user_id)
-
     if not is_user_active(message.from_user.id):
         return
+
+    # status_message_id = send_processing_status(user_id)
 
     if message.text == 'Закончить ответ':
         set_user_active_status(message.from_user.id, False)
@@ -158,6 +156,8 @@ def handle_message(message: Message) -> None:
 
     save_message(user_id, thread_id, "user", user_text)
     try:
+        bot.send_chat_action(message.chat.id, 'typing')
+        status_message_id = send_processing_status(user_id)
         client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
@@ -425,7 +425,7 @@ def fix_bot(message: Message) -> None:
 
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_query(call: Message) -> None:
+def callback_query(call: CallbackQuery) -> None:
     bot.delete_message(call.message.chat.id, call.message.message_id)
     if call.data == 'ai':
         take_message_from_user(call.message)
@@ -442,7 +442,12 @@ def callback_query(call: Message) -> None:
     elif call.data == 'show_history':
         show_message(call.message)
     elif call.data == 'take_mailing_message':
-        take_mailing_message(call.message)
+        # take_mailing_message(call.message)
+        write_mailing_message(call.message)
+    elif call.data == 'accept_mailing_message':
+        mailing(call.message)
+    elif call.data == 'rewrite_mailing_message':
+        write_mailing_message(call.message)
     elif call.data == 'menu_admin':
         admin(call.message)
     elif call.data == 'fix_bot':

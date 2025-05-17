@@ -1,7 +1,5 @@
 import psycopg2
 
-from typing import Optional
-
 
 def create_connection() -> None:
     try:
